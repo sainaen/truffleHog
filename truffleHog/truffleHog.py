@@ -22,7 +22,7 @@ def load_regexes(regexes_fname):
 
     try:
         regexes = {
-            label: re.compile(regex)
+            label: re.compile(regex, re.IGNORECASE)
             for (label, regex) in json.loads(regexes_content).items()
         }
     except (IOError, ValueError) as e:
@@ -256,21 +256,6 @@ def scan_branch(repo, ref, commits_seen, config):
         commits_seen.add(diff_hash)
 
     return found_issues
-
-def compact_findings(found_issues):
-    issue_by_path = dict()
-
-    for issue in found_issues:
-        path = issue['path']
-        if path in issue_by_path:
-            prev = issue_by_path[path]
-            if prev['stringsFound'] == issue['stringsFound']:
-                # we need only the oldest
-                issue_by_path[path] = min(issue, prev, key=lambda i: i['timestamp'])
-        else:
-            issue_by_path[path] = issue
-
-    return list(issue_by_path.values())
 
 def find_strings(config):
     if os.path.isdir(config.git_url):
