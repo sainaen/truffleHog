@@ -226,34 +226,32 @@ def scan_branch(repo, ref, commits_seen, config):
     since_commit_reached = False
     branch_name = ref.name
 
-    commit = None
-    for base in repo.iter_commits(rev=ref.commit, max_count=config.max_depth):
-        if not commit: # for the latest commit there's no base to diff with
-            commit = base
+    for commit in repo.iter_commits(rev=ref.commit, max_count=config.max_depth):
+        if len(commit.parents) > 1:
+            # skip merges
             continue
 
-        diff_hash = "{}-{}".format(base.hexsha, commit.hexsha)
+        base = commit.parents[0] if commit.parents else NULL_TREE
+        base_hash = 'null' if base == NULL_TREE else base.hexsha
+        diff_hash = "{}-{}".format(base_hash, commit.hexsha)
         if diff_hash in commits_seen:
             # no reason to continue since we reached the part
             # of the history that was already explored
             return found_issues
 
-        diff = base.diff(commit, create_patch=True)
+        if base == NULL_TREE:
+            # when it’s the last commit, we need to handle it differently
+            # since NULL_TREE doesn’t have a diff() method
+            diff = commit.diff(base, create_patch=True)
+        else:
+            diff = base.diff(commit, create_patch=True)
+
         found_issues += diff_worker(diff, commit, branch_name, config)
         commits_seen.add(diff_hash)
 
-        if config.since_commit == base.hexsha:
+        if config.since_commit == base_hash:
             # reached the end
             return found_issues
-
-        commit = base
-
-    # handle the oldest commit
-    diff_hash = "{}-{}".format('null', commit.hexsha)
-    if not diff_hash in commits_seen:
-        diff = commit.diff(NULL_TREE, create_patch=True)
-        found_issues += diff_worker(diff, commit, branch_name, config)
-        commits_seen.add(diff_hash)
 
     return found_issues
 
