@@ -111,11 +111,6 @@ class bcolors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
 
-def clone_git_repo(git_url):
-    project_path = tempfile.mkdtemp()
-    Repo.clone_from(git_url, project_path)
-    return project_path
-
 def output_results(results, config):
     if config.output_json:
         print(json.dumps(results, sort_keys=True))
@@ -174,68 +169,119 @@ def regex_check(diff, issue_zigote, regexes):
             regex_matches.append(regex_match)
     return regex_matches
 
-def diff_worker(diff, curr_commit, prev_commit, branch_name, commit_hash, config):
+UNWORTHY_FILES = [
+    "package.json",
+    "yarn.lock",
+    "Pipfile.lock",
+    ".svg",
+    ".css",
+    ".js.map",
+]
+
+def is_worthy_diff(file_diff):
+    """Decides if the given diff is worth looking at."""
+
+    # skip binary files
+    if file_diff.diff.decode('utf-8', errors='replace').startswith("Binary files"):
+        return False
+
+    path = file_diff.b_path if file_diff.b_path else file_diff.a_path
+    for unworthy in UNWORTHY_FILES:
+        if path.endswith(unworthy):
+            return False
+
+    return True
+
+import sys
+
+def diff_worker(diffs, commit, branch_name, config):
     issues = []
-    for blob in diff:
-        blob_diff = blob.diff.decode('utf-8', errors='replace')
-        if blob_diff.startswith("Binary files"):
+    for file_diff in diffs:
+        if not is_worthy_diff(file_diff):
             continue
 
+        patch = file_diff.diff.decode('utf-8', errors='replace')
         issue_zigote = {
-            "date": datetime.datetime.fromtimestamp(prev_commit.committed_date).strftime('%Y-%m-%d %H:%M:%S'),
-            "path": blob.b_path if blob.b_path else blob.a_path,
+            "date": commit.committed_datetime.strftime('%Y-%m-%d %H:%M:%S'),
+            "timestamp": commit.committed_date,
+            "path": file_diff.b_path if file_diff.b_path else file_diff.a_path,
             "branch": branch_name,
-            "commit": prev_commit.message,
-            "diff": blob_diff,
-            "commitHash": commit_hash
+            "commit": commit.message,
+            "diff": patch,
+            "commitHash": commit.hexsha
         }
 
         if config.do_entropy:
-            entropic_diff = find_entropy(blob_diff, issue_zigote)
-            if entropic_diff:
-                issues.append(entropic_diff)
+            found_issue = find_entropy(patch, issue_zigote)
+            if found_issue:
+                issues.append(found_issue)
 
         if config.do_regex:
-            issues += regex_check(blob_diff, issue_zigote, config.regexes)
+            issues += regex_check(patch, issue_zigote, config.regexes)
 
     return issues
 
+def scan_branch(repo, ref, commits_seen, config):
+    found_issues = []
+    since_commit_reached = False
+    branch_name = ref.name
+
+    commit = None
+    for base in repo.iter_commits(rev=ref.commit, max_count=config.max_depth):
+        if not commit: # for the latest commit there's no base to diff with
+            commit = base
+            continue
+
+        diff_hash = "{}-{}".format(base.hexsha, commit.hexsha)
+        if diff_hash in commits_seen:
+            # no reason to continue since we reached the part
+            # of the history that was already explored
+            return found_issues
+
+        diff = base.diff(commit, create_patch=True)
+        found_issues += diff_worker(diff, commit, branch_name, config)
+        commits_seen.add(diff_hash)
+
+        if config.since_commit == base.hexsha:
+            # reached the end
+            return found_issues
+
+        commit = base
+
+    # handle the oldest commit
+    diff_hash = "{}-{}".format('null', commit.hexsha)
+    if not diff_hash in commits_seen:
+        diff = commit.diff(NULL_TREE, create_patch=True)
+        found_issues += diff_worker(diff, commit, branch_name, config)
+        commits_seen.add(diff_hash)
+
+    return found_issues
+
+def compact_findings(found_issues):
+    issue_by_path = dict()
+
+    for issue in found_issues:
+        path = issue['path']
+        if path in issue_by_path:
+            prev = issue_by_path[path]
+            if prev['stringsFound'] == issue['stringsFound']:
+                # we need only the oldest
+                issue_by_path[path] = min(issue, prev, key=lambda i: i['timestamp'])
+        else:
+            issue_by_path[path] = issue
+
+    return list(issue_by_path.values())
+
 def find_strings(config):
-    project_path = clone_git_repo(config.git_url)
-    repo = Repo(project_path)
-    already_searched = set()
-    output_dir = tempfile.mkdtemp()
+    if os.path.isdir(config.git_url):
+        repo = Repo(config.git_url)
+    else:
+        repo = Repo.clone_from(config.git_url, tempfile.mkdtemp())
 
     found_issues = []
-    for remote_branch in repo.remotes.origin.fetch():
-        since_commit_reached = False
-        branch_name = remote_branch.name.split('/')[1]
-        try:
-            repo.git.checkout(remote_branch, b=branch_name)
-        except:
-            pass
-
-        prev_commit = None
-        for curr_commit in repo.iter_commits(max_count=config.max_depth):
-            commit_hash = curr_commit.hexsha
-            if commit_hash == config.since_commit:
-                since_commit_reached = True
-            if config.since_commit and since_commit_reached:
-                prev_commit = curr_commit
-                continue
-            # if not prev_commit, then curr_commit is the newest commit. And we have nothing to diff with.
-            # But we will diff the first commit with NULL_TREE here to check the oldest code.
-            # In this way, no commit will be missed.
-            if not prev_commit:
-                prev_commit = curr_commit
-                continue
-            else:
-                diff = prev_commit.diff(curr_commit, create_patch=True)
-            found_issues += diff_worker(diff, curr_commit, prev_commit, branch_name, commit_hash, config)
-            prev_commit = curr_commit
-        # Handling the first commit
-        diff = curr_commit.diff(NULL_TREE, create_patch=True)
-        found_issues += diff_worker(diff, curr_commit, prev_commit, branch_name, commit_hash, config)
+    commits_seen = set()
+    for ref in repo.refs:
+        found_issues += scan_branch(repo, ref, commits_seen, config)
 
     return found_issues
 
