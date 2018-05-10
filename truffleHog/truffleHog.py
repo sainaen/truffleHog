@@ -124,7 +124,7 @@ def mark_strings(diff, strings_found):
         diff = diff.replace(found_string, bcolors.WARNING + found_string + bcolors.ENDC)
     return diff
 
-def print_issue(issue, print_diff):
+def print_issue(issue):
     print("~~~~~~~~~~~~~~~~~~~~~")
     print("{}Reason: {}{}".format(bcolors.OKGREEN, issue['reason'], bcolors.ENDC))
     print("{}Date: {}{}".format(bcolors.OKGREEN, issue['date'], bcolors.ENDC))
