@@ -53,8 +53,8 @@ def config_from_args():
 
 def main():
     config = config_from_args()
-    results = find_strings(config)
-    output_results(results, config)
+    results = itertools.chain.from_iterable(find_strings(config))
+    output_results(list(results), config)
 
 def str2bool(v):
     if v == None:
@@ -151,12 +151,11 @@ def find_entropy(diff, issue_zigote, commit_hash):
                 if hexEntropy > 3:
                     strings_found.append(string)
 
-    entropic_diff = None
     if strings_found:
         entropic_diff = dict(issue_zigote) # make a copy
         entropic_diff['stringsFound'] = strings_found
         entropic_diff['reason'] = "High Entropy"
-    return entropic_diff
+        yield entropic_diff
 
 def regex_check(diff, issue_zigote, regexes):
     regex_matches = []
@@ -166,8 +165,7 @@ def regex_check(diff, issue_zigote, regexes):
             regex_match = dict(issue_zigote) # make a copy
             regex_match['stringsFound'] = strings_found
             regex_match['reason'] = key
-            regex_matches.append(regex_match)
-    return regex_matches
+            yield regex_match
 
 UNWORTHY_FILES = [
     "package.json",
@@ -193,9 +191,9 @@ def is_worthy_diff(file_diff):
     return True
 
 import sys
+import itertools
 
 def diff_worker(diffs, commit, branch_name, config):
-    issues = []
     for file_diff in diffs:
         if not is_worthy_diff(file_diff):
             continue
@@ -211,19 +209,12 @@ def diff_worker(diffs, commit, branch_name, config):
             "commitHash": commit.hexsha
         }
 
-        if config.do_entropy:
-            found_issue = find_entropy(patch, issue_zigote)
-            if found_issue:
-                issues.append(found_issue)
+        entropy_issues = find_entropy(patch, issue_zigote) if config.do_entropy else []
+        regex_issues = regex_check(patch, issue_zigote, config.regexes) if config.do_regex else []
 
-        if config.do_regex:
-            issues += regex_check(patch, issue_zigote, config.regexes)
-
-    return issues
+        yield itertools.chain(entropy_issues, regex_issues)
 
 def scan_branch(repo, ref, commits_seen, config):
-    found_issues = []
-    since_commit_reached = False
     branch_name = ref.name
 
     for commit in repo.iter_commits(rev=ref.commit, max_count=config.max_depth):
@@ -237,7 +228,7 @@ def scan_branch(repo, ref, commits_seen, config):
         if diff_hash in commits_seen:
             # no reason to continue since we reached the part
             # of the history that was already explored
-            return found_issues
+            return
 
         if base == NULL_TREE:
             # when it’s the last commit, we need to handle it differently
@@ -246,14 +237,14 @@ def scan_branch(repo, ref, commits_seen, config):
         else:
             diff = base.diff(commit, create_patch=True)
 
-        found_issues += diff_worker(diff, commit, branch_name, config)
+        found_issues = diff_worker(diff, commit, branch_name, config)
+        yield itertools.chain.from_iterable(found_issues)
+
         commits_seen.add(diff_hash)
 
         if config.since_commit == base_hash:
             # reached the end
-            return found_issues
-
-    return found_issues
+            return
 
 def find_strings(config):
     if os.path.isdir(config.git_url):
@@ -261,12 +252,10 @@ def find_strings(config):
     else:
         repo = Repo.clone_from(config.git_url, tempfile.mkdtemp())
 
-    found_issues = []
     commits_seen = set()
     for ref in repo.refs:
-        found_issues += scan_branch(repo, ref, commits_seen, config)
-
-    return found_issues
+        results = scan_branch(repo, ref, commits_seen, config)
+        yield itertools.chain.from_iterable(results)
 
 if __name__ == "__main__":
     main()
