@@ -192,8 +192,6 @@ def is_worthy_diff(file_diff):
 
     return True
 
-import sys
-
 def diff_worker(diffs, commit, branch_name, config):
     issues = []
     for file_diff in diffs:
